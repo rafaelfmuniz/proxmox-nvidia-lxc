@@ -28,8 +28,6 @@ A comprehensive, automated script to configure NVIDIA GPU passthrough for LXC co
 ### One-line Installation & Execution
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/rafaelfmuniz/proxmox-nvidia-lxc/main/nvidia-lxc-setup.sh | bash
-
 # Download the script
 wget https://raw.githubusercontent.com/rafaelfmuniz/proxmox-nvidia-lxc/main/nvidia-lxc-setup.sh
 
