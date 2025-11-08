@@ -18,7 +18,7 @@ A comprehensive, automated script to configure NVIDIA GPU passthrough for LXC co
 
 ## 📋 Requirements
 
-- Proxmox VE 7.x or 8.x
+- Proxmox VE 7.x or +
 - NVIDIA GPU with compatible drivers
 - LXC containers (tested with Ubuntu/Debian)
 - Internet connection for driver installation
