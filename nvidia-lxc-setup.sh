@@ -116,6 +116,11 @@ container_exists() {
     pct list | grep -q "^$1"
 }
 
+# Function to check container status
+container_is_running() {
+    [ "$(pct status $1 | grep -o 'running')" == "running" ]
+}
+
 # Function to check for REAL NVIDIA components in the container
 check_nvidia_components_in_container() {
     local CTID=$1
@@ -123,7 +128,7 @@ check_nvidia_components_in_container() {
     log "INFO" "Checking for NVIDIA components in CT $CTID..."
     
     # Check if container is running
-    if [ "$(pct status $CTID | grep -o 'running')" != "running" ]; then
+    if ! container_is_running $CTID; then
         log "WARNING" "Container is not running, cannot check components"
         return 1
     fi
@@ -199,7 +204,7 @@ clean_existing_nvidia_components() {
     log "INFO" "Automatically removing NVIDIA components from container..."
     
     # Stop container BEFORE anything
-    if [ "$(pct status $CTID | grep -o 'running')" == "running" ]; then
+    if container_is_running $CTID; then
         log "INFO" "Stopping container $CTID..."
         pct stop $CTID
         sleep 3
@@ -371,7 +376,13 @@ configure_single_container_correct() {
     fi
     
     # Clean NVIDIA components only if they exist (AUTOMATIC)
-    clean_existing_nvidia_components $CTID
+    # MAS AGORA SÓ LIMPA SE REALMENTE EXISTIREM COMPONENTES NVIDIA
+    if check_nvidia_components_in_container $CTID; then
+        log "INFO" "NVIDIA components found, cleaning..."
+        clean_existing_nvidia_components $CTID
+    else
+        log "INFO" "No NVIDIA components found, skipping cleanup"
+    fi
     
     # Completely clear previous configurations
     log "INFO" "Cleaning previous container configurations..."
@@ -412,6 +423,14 @@ configure_single_container_correct() {
     log "SUCCESS" "Configuration applied"
     log "INFO" "Configuration content:"
     grep -E "^(lxc.cgroup2.devices.allow:|dev[0-9]+: /dev/nvidia|lxc.mount.entry)" /etc/pve/lxc/${CTID}.conf
+    
+    # Restart container to apply changes
+    log "INFO" "Restarting container to apply changes..."
+    if container_is_running $CTID; then
+        log "INFO" "Container is running, stopping..."
+        pct stop $CTID
+        sleep 2
+    fi
     
     # Start container
     log "INFO" "Starting container..."
@@ -481,7 +500,7 @@ diagnose_container() {
     ls -la /dev/nvidia* 2>/dev/null || echo "No NVIDIA devices on host"
     
     # 4. If container is running, check inside
-    if [ "$(pct status $CTID | grep -o 'running')" == "running" ]; then
+    if container_is_running $CTID; then
         echo -e "\n${YELLOW}4. DEVICES INSIDE CONTAINER:${NC}"
         pct exec $CTID -- ls -la /dev/nvidia* 2>/dev/null || echo "No NVIDIA devices in container"
         
@@ -512,7 +531,7 @@ clean_single_container() {
     log "INFO" "Cleaning NVIDIA configurations from CT $CTID: $container_name"
     
     # Stop container if running
-    if [ "$(pct status $CTID | grep -o 'running')" == "running" ]; then
+    if container_is_running $CTID; then
         log "INFO" "Stopping container $CTID..."
         pct stop $CTID
         sleep 2
@@ -552,7 +571,7 @@ test_single_container() {
     echo
     echo -e "${YELLOW}--- Testing CT $CTID: $container_name ---${NC}"
     
-    if [ "$(pct status $CTID | grep -o 'running')" == "running" ]; then
+    if container_is_running $CTID; then
         log "INFO" "Container $CTID is running"
         
         # Test COMPLETE nvidia-smi
@@ -588,7 +607,7 @@ install_nvtop_container() {
     
     log "INFO" "Installing nvtop in CT $CTID: $container_name"
     
-    if [ "$(pct status $CTID | grep -o 'running')" != "running" ]; then
+    if ! container_is_running $CTID; then
         log "WARNING" "Container $CTID is not running, starting..."
         pct start $CTID
         sleep 5
