@@ -694,7 +694,7 @@ main() {
     check_proxmox
     
     echo -e "${BLUE}=== NVIDIA GPU Script for LXC Proxmox ===${NC}"
-    echo "ONE-LINE INSTALL Version 2.1"
+    echo "ONE-LINE INSTALL Version 2.0"
     echo
     
     # Check and install NVIDIA drivers on HOST if needed
