@@ -25,13 +25,20 @@ A comprehensive, automated script to configure NVIDIA GPU passthrough for LXC co
 
 ## 🛠 Quick Start
 
-### One-line Installation & Execution v2.0
+# NVIDIA GPU Passthrough for LXC Proxmox
+
+Automated script for NVIDIA GPU passthrough to LXC containers in Proxmox VE.
+
+## 🚀 Quick Installation
+
+### Version 2.0 (Recommended) - One-Line Install:
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/rafaelfmuniz/proxmox-nvidia-lxc/main/nvidia-lxc-one-line.sh)"
 ````
 
-### One-line Installation & Execution v1.0
+### Installation & Execution v1.0
+
 ```bash
 # Download the script
 wget https://raw.githubusercontent.com/rafaelfmuniz/proxmox-nvidia-lxc/main/nvidia-lxc-setup.sh
@@ -41,3 +48,5 @@ chmod +x nvidia-lxc-setup.sh
 
 # Run the script
 ./nvidia-lxc-setup.sh
+````
+
