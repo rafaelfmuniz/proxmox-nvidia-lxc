@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # NVIDIA GPU Passthrough for LXC Proxmox - One Line Install
-# Version: 2.0
+# Version: 2.1 - Fixed for one-line execution
 # Author: Rafael Muniz
 # GitHub: https://github.com/rafaelfmuniz/proxmox-nvidia-lxc
 
@@ -413,7 +413,7 @@ configure_single_container_correct() {
     fi
     
     # Clean NVIDIA components only if they exist (AUTOMATIC)
-    # MAS AGORA SÓ LIMPA SE REALMENTE EXISTIREM COMPONENTES NVIDIA
+    # BUT NOW ONLY CLEANS IF REAL NVIDIA COMPONENTS EXIST
     if check_nvidia_components_in_container $CTID; then
         log "INFO" "NVIDIA components found, cleaning..."
         clean_existing_nvidia_components $CTID
@@ -689,8 +689,12 @@ install_nvtop_container() {
 
 # UPDATED main function
 main() {
+    show_welcome
+    check_root
+    check_proxmox
+    
     echo -e "${BLUE}=== NVIDIA GPU Script for LXC Proxmox ===${NC}"
-    echo "AUTOMATED and FIXED Version"
+    echo "ONE-LINE INSTALL Version 2.1"
     echo
     
     # Check and install NVIDIA drivers on HOST if needed
@@ -809,6 +813,7 @@ main() {
                 ;;
             6)
                 log "INFO" "Exiting..."
+                echo -e "${GREEN}✅ Script completed successfully!${NC}"
                 exit 0
                 ;;
             *)
@@ -821,5 +826,5 @@ main() {
     done
 }
 
-# Execute main script
+# Execute main script directly - FIXED for one-line execution
 main "$@"
