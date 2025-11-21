@@ -826,7 +826,5 @@ main() {
     done
 }
 
-# Execute main script if run directly
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    main "$@"
-fi
+# Execute main script
+main "$@"
