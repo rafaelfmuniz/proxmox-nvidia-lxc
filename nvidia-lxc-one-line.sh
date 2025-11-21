@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # NVIDIA GPU Passthrough for LXC Proxmox - One Line Install
-# Version: 2.0 - Fixed for one-line execution
+# Version: 2.1 - Docker Stack with GPU Support
 # Author: Rafael Muniz
 # GitHub: https://github.com/rafaelfmuniz/proxmox-nvidia-lxc
 
@@ -13,7 +13,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # Script information
-SCRIPT_VERSION="2.0"
+SCRIPT_VERSION="2.1"
 SCRIPT_URL="https://github.com/rafaelfmuniz/proxmox-nvidia-lxc"
 
 # Display welcome message
@@ -21,7 +21,7 @@ show_welcome() {
     echo -e "${BLUE}"
     echo "╔══════════════════════════════════════════════════════════╗"
     echo "║           NVIDIA GPU Passthrough for LXC Proxmox         ║"
-    echo "║               One-Line Install - Version 2.0             ║"
+    echo "║         Version 2.1 - Docker Stack with GPU Support      ║"
     echo "╚══════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
     echo -e "${YELLOW}GitHub: $SCRIPT_URL${NC}"
@@ -687,6 +687,233 @@ install_nvtop_container() {
     return 1
 }
 
+# Function to install Docker with GPU support
+install_docker_stack() {
+    local CTID=$1
+    local container_name=$(pct config $CTID | grep -oP 'hostname: \K.*' || echo "N/A")
+    
+    echo
+    echo -e "${BLUE}=== Docker Stack Installation for CT $CTID: $container_name ===${NC}"
+    
+    # Check if container is running
+    if ! container_is_running $CTID; then
+        log "ERROR" "Container $CTID is not running"
+        return 1
+    fi
+    
+    # Check if we have GPU access in the container
+    log "INFO" "Checking GPU access in container..."
+    if ! pct exec $CTID -- ls /dev/nvidia0 >/dev/null 2>&1; then
+        log "ERROR" "GPU not accessible in container. Please configure GPU first using option 1."
+        return 1
+    fi
+    
+    log "SUCCESS" "GPU is accessible in container"
+    
+    # Installation choices
+    echo
+    echo -e "${YELLOW}Select components to install:${NC}"
+    echo "1) Docker + Docker Compose + Portainer CE (Full stack)"
+    echo "2) Docker only"
+    echo "3) Docker + Docker Compose"
+    echo "4) Cancel"
+    
+    read -p "Choose option [1-4]: " docker_choice
+    
+    case $docker_choice in
+        1)
+            install_docker=true
+            install_compose=true
+            install_portainer=true
+            ;;
+        2)
+            install_docker=true
+            install_compose=false
+            install_portainer=false
+            ;;
+        3)
+            install_docker=true
+            install_compose=true
+            install_portainer=false
+            ;;
+        4)
+            log "INFO" "Docker installation cancelled"
+            return 0
+            ;;
+        *)
+            log "ERROR" "Invalid option"
+            return 1
+            ;;
+    esac
+    
+    # Start installation
+    log "INFO" "Starting Docker stack installation..."
+    
+    # Update system
+    log "INFO" "Updating package list..."
+    pct exec $CTID -- apt-get update
+    
+    # Install prerequisites
+    log "INFO" "Installing prerequisites..."
+    pct exec $CTID -- apt-get install -y \
+        ca-certificates \
+        curl \
+        gnupg \
+        lsb-release \
+        apt-transport-https \
+        software-properties-common
+    
+    # Install Docker
+    if [ "$install_docker" = true ]; then
+        log "INFO" "Installing Docker..."
+        
+        # Add Docker's official GPG key
+        pct exec $CTID -- mkdir -p /etc/apt/keyrings
+        pct exec $CTID -- curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        
+        # Add Docker repository
+        pct exec $CTID -- echo \
+            "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+            $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+        
+        # Update and install Docker
+        pct exec $CTID -- apt-get update
+        pct exec $CTID -- apt-get install -y docker-ce docker-ce-cli containerd.io
+        
+        # Start and enable Docker
+        pct exec $CTID -- systemctl start docker
+        pct exec $CTID -- systemctl enable docker
+        
+        # Add user to docker group (if user exists)
+        pct exec $CTID -- getent passwd ubuntu >/dev/null && pct exec $CTID -- usermod -aG docker ubuntu
+        pct exec $CTID -- getent passwd admin >/dev/null && pct exec $CTID -- usermod -aG docker admin
+        pct exec $CTID -- getent passwd root >/dev/null && pct exec $CTID -- usermod -aG docker root
+        
+        log "SUCCESS" "Docker installed successfully"
+    fi
+    
+    # Install Docker Compose
+    if [ "$install_compose" = true ]; then
+        log "INFO" "Installing Docker Compose..."
+        
+        # Download and install Docker Compose
+        pct exec $CTID -- curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+        pct exec $CTID -- chmod +x /usr/local/bin/docker-compose
+        
+        # Create symbolic link
+        pct exec $CTID -- ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
+        
+        log "SUCCESS" "Docker Compose installed successfully"
+    fi
+    
+    # Install NVIDIA Container Toolkit
+    log "INFO" "Installing NVIDIA Container Toolkit for GPU support..."
+    
+    # Add NVIDIA's official GPG key
+    pct exec $CTID -- curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    
+    # Add NVIDIA's repository
+    pct exec $CTID -- curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+        tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    
+    # Update and install
+    pct exec $CTID -- apt-get update
+    pct exec $CTID -- apt-get install -y nvidia-container-toolkit
+    
+    # Configure Docker to use NVIDIA runtime
+    pct exec $CTID -- nvidia-ctk runtime configure --runtime=docker
+    pct exec $CTID -- systemctl restart docker
+    
+    log "SUCCESS" "NVIDIA Container Toolkit installed and configured"
+    
+    # Install Portainer CE
+    if [ "$install_portainer" = true ]; then
+        log "INFO" "Installing Portainer CE..."
+        
+        # Create volume for Portainer
+        pct exec $CTID -- docker volume create portainer_data
+        
+        # Run Portainer container
+        pct exec $CTID -- docker run -d \
+            --name portainer \
+            --restart always \
+            -p 8000:8000 \
+            -p 9443:9443 \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v portainer_data:/data \
+            portainer/portainer-ce:latest
+        
+        log "SUCCESS" "Portainer CE installed successfully"
+        
+        # Get container IP for Portainer access
+        log "INFO" "Getting container network information..."
+        local container_ip=$(pct exec $CTID -- hostname -I | awk '{print $1}')
+        
+        echo
+        echo -e "${GREEN}🎉 PORTAINER INSTALLATION COMPLETE!${NC}"
+        echo -e "${YELLOW}================================${NC}"
+        echo -e "${GREEN}🌐 Portainer Web UI:${NC}"
+        echo -e "   HTTPS: https://${container_ip}:9443"
+        echo -e "   HTTP:  http://${container_ip}:9000 (if enabled)"
+        echo
+        echo -e "${GREEN}🔧 First-time setup:${NC}"
+        echo -e "   1. Open https://${container_ip}:9443 in your browser"
+        echo -e "   2. Create admin user account"
+        echo -e "   3. Start managing your Docker environment!"
+        echo
+        echo -e "${YELLOW}📝 Note: You may need to adjust firewall rules if you can't access the web interface.${NC}"
+    fi
+    
+    # Test GPU with Docker
+    log "INFO" "Testing GPU access in Docker..."
+    if pct exec $CTID -- docker run --rm --runtime=nvidia --gpus all nvidia/cuda:11.0-base nvidia-smi; then
+        log "SUCCESS" "✅ GPU access in Docker is working!"
+    else
+        log "WARNING" "GPU test in Docker failed, but installation completed"
+    fi
+    
+    # Final instructions
+    echo
+    echo -e "${GREEN}✅ Docker stack installation completed!${NC}"
+    echo -e "${YELLOW}Available commands:${NC}"
+    echo -e "   docker --version"
+    echo -e "   docker-compose --version"
+    echo -e "   docker ps"
+    echo
+    echo -e "${YELLOW}To run Docker containers with GPU:${NC}"
+    echo -e "   docker run --runtime=nvidia --gpus all your-image"
+    echo -e "   or"
+    echo -e "   docker run --gpus all your-image"
+    
+    return 0
+}
+
+# Function to handle Docker installation for multiple containers
+install_docker_stack_multiple() {
+    echo -e "${BLUE}=== Docker Stack Installation ===${NC}"
+    
+    if [ ${#valid_containers[@]} -eq 0 ]; then
+        log "ERROR" "No valid containers selected"
+        return 1
+    fi
+    
+    for CTID in "${valid_containers[@]}"; do
+        echo
+        echo -e "${YELLOW}--- Processing CT $CTID ---${NC}"
+        if install_docker_stack $CTID; then
+            echo -e "${GREEN}🎉 Docker stack installed successfully in CT $CTID${NC}"
+        else
+            echo -e "${RED}❌ Failed to install Docker stack in CT $CTID${NC}"
+            if [ ${#valid_containers[@]} -gt 1 ]; then
+                read -p "Continue with next container? (y/N): " -r continue_next
+                if [[ ! "$continue_next" =~ ^[Yy]$ ]]; then
+                    break
+                fi
+            fi
+        fi
+    done
+}
+
 # UPDATED main function
 main() {
     show_welcome
@@ -694,7 +921,7 @@ main() {
     check_proxmox
     
     echo -e "${BLUE}=== NVIDIA GPU Script for LXC Proxmox ===${NC}"
-    echo "ONE-LINE INSTALL Version 2.0"
+    echo "ONE-LINE INSTALL Version 2.1 - Docker Stack with GPU Support"
     echo
     
     # Check and install NVIDIA drivers on HOST if needed
@@ -760,10 +987,11 @@ main() {
         echo "2) Clean NVIDIA configurations"
         echo "3) Test GPU in containers" 
         echo "4) Install nvtop (monitoring)"
-        echo "5) Complete Container Diagnosis"
-        echo "6) Exit"
+        echo "5) 🆕 Install Docker Stack with GPU support"
+        echo "6) Complete Container Diagnosis"
+        echo "7) Exit"
         echo
-        read -p "Choose an option [1-6]: " main_choice
+        read -p "Choose an option [1-7]: " main_choice
         
         case $main_choice in
             1)
@@ -775,7 +1003,7 @@ main() {
                         echo -e "${GREEN}🎉 Container $CTID configured SUCCESSFULLY!${NC}"
                     else
                         echo -e "${RED}❌ Failed to configure CT $CTID${NC}"
-                        echo -e "${YELLOW}Use option 5 (Diagnosis) to investigate.${NC}"
+                        echo -e "${YELLOW}Use option 6 (Diagnosis) to investigate.${NC}"
                         if [ ${#valid_containers[@]} -gt 1 ]; then
                             read -p "Continue with next container? (y/N): " -r continue_next
                             if [[ ! "$continue_next" =~ ^[Yy]$ ]]; then
@@ -806,12 +1034,16 @@ main() {
                 done
                 ;;
             5)
+                echo -e "${BLUE}=== Installing Docker Stack with GPU support ===${NC}"
+                install_docker_stack_multiple
+                ;;
+            6)
                 echo -e "${BLUE}=== Complete Container Diagnosis ===${NC}"
                 for CTID in "${valid_containers[@]}"; do
                     diagnose_container $CTID
                 done
                 ;;
-            6)
+            7)
                 log "INFO" "Exiting..."
                 echo -e "${GREEN}✅ Script completed successfully!${NC}"
                 exit 0
