@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # NVIDIA GPU Passthrough for LXC Proxmox - One Line Install
-# Version: 2.1 - Fixed for one-line execution
+# Version: 2.0 - Fixed for one-line execution
 # Author: Rafael Muniz
 # GitHub: https://github.com/rafaelfmuniz/proxmox-nvidia-lxc
 
