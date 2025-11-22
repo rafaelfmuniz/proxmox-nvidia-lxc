@@ -687,7 +687,7 @@ install_nvtop_container() {
     return 1
 }
 
-# Function to install Docker with GPU support
+# CORRIGIDA: Function to install Docker with GPU support
 install_docker_stack() {
     local CTID=$1
     local container_name=$(pct config $CTID | grep -oP 'hostname: \K.*' || echo "N/A")
@@ -839,27 +839,43 @@ install_docker_stack() {
         fi
     fi
     
-    # Configure Docker for GPU support
+    # CORRIGIDO: Configure Docker for GPU support
     log "INFO" "Configuring Docker for GPU support..."
     
     # Create Docker daemon configuration directory
     pct exec $CTID -- mkdir -p /etc/docker
     
-    # Create basic daemon.json without nvidia runtime (since we can't install the toolkit)
-    pct exec $CTID -- cat > /etc/docker/daemon.json << 'EOF'
+    # CORRIGIDO: Create daemon.json with proper permissions and content
+    pct exec $CTID -- bash -c 'cat > /etc/docker/daemon.json << "EOF"
 {
-    "log-driver": "json-file",
-    "log-opts": {
-        "max-size": "10m",
-        "max-file": "3"
+    "runtimes": {
+        "nvidia": {
+            "path": "nvidia-container-runtime",
+            "runtimeArgs": []
+        }
     }
 }
-EOF
+EOF'
+    
+    # CORRIGIDO: Set proper permissions
+    pct exec $CTID -- chmod 644 /etc/docker/daemon.json
+    
+    # Install NVIDIA Container Toolkit in the container
+    log "INFO" "Installing NVIDIA Container Toolkit in container..."
+    pct exec $CTID -- apt-get update
+    pct exec $CTID -- apt-get install -y curl
+    
+    # Add NVIDIA Container Toolkit repository
+    pct exec $CTID -- curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    pct exec $CTID -- curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    
+    pct exec $CTID -- apt-get update
+    pct exec $CTID -- apt-get install -y nvidia-container-toolkit nvidia-docker2
     
     # Restart Docker to apply changes
     pct exec $CTID -- systemctl restart docker
     
-    log "SUCCESS" "Docker configured successfully"
+    log "SUCCESS" "Docker configured successfully for GPU support"
     
     # Handle Portainer installation/repair
     if [ "$install_portainer" = true ] || ([ "$repair_mode" = true ] && [ -n "$portainer_running" ]); then
@@ -953,37 +969,35 @@ EOF
         fi
     fi
     
-    # Test GPU access with available CUDA images
+    # CORRIGIDO: Test GPU access with NVIDIA Container Toolkit
     log "INFO" "Testing GPU access in Docker..."
     
-    # List of CUDA images to try (most likely to work)
-    local cuda_images=(
-        "nvidia/cuda:12.0.0-base-ubuntu20.04"
-        "nvidia/cuda:11.8.0-base-ubuntu20.04" 
-        "nvidia/cuda:11.0.3-base-ubuntu20.04"
-        "nvidia/cuda:12.0.0-base"
-        "nvidia/cuda:11.8.0-base"
-    )
-    
-    local gpu_working=false
-    for image in "${cuda_images[@]}"; do
-        log "INFO" "Trying CUDA image: $image"
-        if pct exec $CTID -- docker run --rm --gpus all "$image" nvidia-smi 2>/dev/null; then
-            log "SUCCESS" "✅ GPU access in Docker is working with $image!"
-            gpu_working=true
-            break
+    if pct exec $CTID -- docker run --rm --runtime=nvidia nvidia/cuda:12.0.0-base-ubuntu20.04 nvidia-smi 2>/dev/null; then
+        log "SUCCESS" "✅ GPU access in Docker is working with NVIDIA runtime!"
+    else
+        log "WARNING" "Trying alternative GPU access method..."
+        
+        # Try with --gpus all flag
+        if pct exec $CTID -- docker run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu20.04 nvidia-smi 2>/dev/null; then
+            log "SUCCESS" "✅ GPU access in Docker is working with --gpus all!"
+        else
+            log "WARNING" "❌ GPU access test failed with standard methods"
+            
+            # Try manual device mapping as last resort
+            log "INFO" "Trying manual device mapping..."
+            if pct exec $CTID -- docker run --rm \
+                -v /dev/nvidia0:/dev/nvidia0 \
+                -v /dev/nvidiactl:/dev/nvidiactl \
+                -v /dev/nvidia-modeset:/dev/nvidia-modeset \
+                -v /dev/nvidia-uvm:/dev/nvidia-uvm \
+                nvidia/cuda:12.0.0-base-ubuntu20.04 nvidia-smi 2>/dev/null; then
+                log "SUCCESS" "✅ GPU access works with manual device mapping!"
+            else
+                log "WARNING" "⚠️ GPU access may need additional configuration"
+                echo -e "${YELLOW}Try manual debugging:${NC}"
+                echo -e "pct exec $CTID -- docker run --rm -v /dev/nvidia0:/dev/nvidia0 nvidia/cuda:12.0.0-base-ubuntu20.04 nvidia-smi"
+            fi
         fi
-    done
-    
-    if [ "$gpu_working" = false ]; then
-        log "WARNING" "❌ GPU access test failed with standard images"
-        echo -e "${YELLOW}⚠️ GPU access may need manual configuration${NC}"
-        echo -e "${YELLOW}Try manual device mapping:${NC}"
-        echo -e "docker run --rm \\"
-        echo -e "  -v /dev/nvidia0:/dev/nvidia0 \\"
-        echo -e "  -v /dev/nvidiactl:/dev/nvidiactl \\"
-        echo -e "  -v /dev/nvidia-modeset:/dev/nvidia-modeset \\"
-        echo -e "  nvidia/cuda:12.0.0-base-ubuntu20.04 nvidia-smi"
     fi
     
     # Final summary
@@ -994,7 +1008,6 @@ EOF
     pct exec $CTID -- docker --version && echo -e "  ✅ Docker"
     pct exec $CTID -- which docker-compose >/dev/null 2>&1 && echo -e "  ✅ Docker Compose"
     pct exec $CTID -- docker ps --filter "name=portainer" --format "{{.Names}}" | grep -q portainer && echo -e "  ✅ Portainer"
-    [ "$gpu_working" = true ] && echo -e "  ✅ GPU Access"
     
     echo
     echo -e "${YELLOW}Next steps:${NC}"
