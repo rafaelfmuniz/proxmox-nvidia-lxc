@@ -759,37 +759,61 @@ install_docker_stack() {
         ca-certificates \
         curl \
         gnupg \
-        lsb-release \
-        apt-transport-https \
-        software-properties-common
+        lsb-release
     
-    # Install Docker
+    # Detect distribution and version
+    log "INFO" "Detecting distribution..."
+    local distro_info=$(pct exec $CTID -- cat /etc/os-release)
+    local distro_name=$(echo "$distro_info" | grep -oP '^ID=\K\w+' | head -1)
+    local distro_version=$(echo "$distro_info" | grep -oP '^VERSION_ID="?\K[\w\.]+' | head -1)
+    
+    log "INFO" "Detected: $distro_name $distro_version"
+    
+    # Install Docker based on distribution
     if [ "$install_docker" = true ]; then
         log "INFO" "Installing Docker..."
         
-        # Add Docker's official GPG key
-        pct exec $CTID -- mkdir -p /etc/apt/keyrings
-        pct exec $CTID -- curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-        
-        # Add Docker repository
-        pct exec $CTID -- echo \
-            "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-            $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-        
-        # Update and install Docker
-        pct exec $CTID -- apt-get update
-        pct exec $CTID -- apt-get install -y docker-ce docker-ce-cli containerd.io
+        if [ "$distro_name" = "ubuntu" ]; then
+            # Ubuntu installation
+            pct exec $CTID -- mkdir -p /etc/apt/keyrings
+            pct exec $CTID -- curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+            
+            pct exec $CTID -- echo \
+                "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+                $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+            
+            pct exec $CTID -- apt-get update
+            pct exec $CTID -- apt-get install -y docker-ce docker-ce-cli containerd.io
+            
+        elif [ "$distro_name" = "debian" ]; then
+            # Debian installation - use official Docker script for compatibility
+            log "INFO" "Using Docker official installation script for Debian..."
+            pct exec $CTID -- curl -fsSL https://get.docker.com -o get-docker.sh
+            pct exec $CTID -- sh get-docker.sh
+            pct exec $CTID -- rm get-docker.sh
+        else
+            log "ERROR" "Unsupported distribution: $distro_name"
+            return 1
+        fi
         
         # Start and enable Docker
         pct exec $CTID -- systemctl start docker
         pct exec $CTID -- systemctl enable docker
         
-        # Add user to docker group (if user exists)
-        pct exec $CTID -- getent passwd ubuntu >/dev/null && pct exec $CTID -- usermod -aG docker ubuntu
-        pct exec $CTID -- getent passwd admin >/dev/null && pct exec $CTID -- usermod -aG docker admin
-        pct exec $CTID -- getent passwd root >/dev/null && pct exec $CTID -- usermod -aG docker root
+        # Add users to docker group
+        pct exec $CTID -- getent passwd ubuntu >/dev/null 2>&1 && pct exec $CTID -- usermod -aG docker ubuntu
+        pct exec $CTID -- getent passwd admin >/dev/null 2>&1 && pct exec $CTID -- usermod -aG docker admin
+        pct exec $CTID -- usermod -aG docker root
         
-        log "SUCCESS" "Docker installed successfully"
+        # Verify Docker installation
+        if pct exec $CTID -- docker --version >/dev/null 2>&1; then
+            log "SUCCESS" "Docker installed successfully"
+            local docker_version=$(pct exec $CTID -- docker --version)
+            log "INFO" "Docker version: $docker_version"
+        else
+            log "ERROR" "Docker installation failed"
+            return 1
+        fi
     fi
     
     # Install Docker Compose
@@ -803,28 +827,56 @@ install_docker_stack() {
         # Create symbolic link
         pct exec $CTID -- ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
         
-        log "SUCCESS" "Docker Compose installed successfully"
+        # Verify installation
+        if pct exec $CTID -- docker-compose --version >/dev/null 2>&1; then
+            log "SUCCESS" "Docker Compose installed successfully"
+        else
+            log "ERROR" "Docker Compose installation failed"
+        fi
     fi
     
     # Install NVIDIA Container Toolkit
     log "INFO" "Installing NVIDIA Container Toolkit for GPU support..."
     
-    # Add NVIDIA's official GPG key
-    pct exec $CTID -- curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    # For Debian Trixie, we need to use a different approach
+    if [ "$distro_name" = "debian" ]; then
+        log "INFO" "Using NVIDIA container runtime for Debian..."
+        
+        # Install using distribution packages
+        pct exec $CTID -- apt-get install -y nvidia-container-runtime
+        
+        # Configure Docker to use NVIDIA runtime
+        pct exec $CTID -- mkdir -p /etc/docker
+        pct exec $CTID -- cat > /etc/docker/daemon.json << 'EOF'
+{
+    "runtimes": {
+        "nvidia": {
+            "path": "/usr/bin/nvidia-container-runtime",
+            "runtimeArgs": []
+        }
+    },
+    "default-runtime": "nvidia"
+}
+EOF
+        
+    else
+        # Standard installation for Ubuntu
+        pct exec $CTID -- curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+        
+        pct exec $CTID -- curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+            tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+        
+        pct exec $CTID -- apt-get update
+        pct exec $CTID -- apt-get install -y nvidia-container-toolkit
+        
+        # Configure Docker to use NVIDIA runtime
+        pct exec $CTID -- nvidia-ctk runtime configure --runtime=docker
+    fi
     
-    # Add NVIDIA's repository
-    pct exec $CTID -- curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-        tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-    
-    # Update and install
-    pct exec $CTID -- apt-get update
-    pct exec $CTID -- apt-get install -y nvidia-container-toolkit
-    
-    # Configure Docker to use NVIDIA runtime
-    pct exec $CTID -- nvidia-ctk runtime configure --runtime=docker
+    # Restart Docker to apply changes
     pct exec $CTID -- systemctl restart docker
     
-    log "SUCCESS" "NVIDIA Container Toolkit installed and configured"
+    log "SUCCESS" "NVIDIA Container Toolkit configured"
     
     # Install Portainer CE
     if [ "$install_portainer" = true ]; then
@@ -843,25 +895,33 @@ install_docker_stack() {
             -v portainer_data:/data \
             portainer/portainer-ce:latest
         
-        log "SUCCESS" "Portainer CE installed successfully"
+        # Wait for Portainer to start
+        sleep 5
         
-        # Get container IP for Portainer access
-        log "INFO" "Getting container network information..."
-        local container_ip=$(pct exec $CTID -- hostname -I | awk '{print $1}')
-        
-        echo
-        echo -e "${GREEN}🎉 PORTAINER INSTALLATION COMPLETE!${NC}"
-        echo -e "${YELLOW}================================${NC}"
-        echo -e "${GREEN}🌐 Portainer Web UI:${NC}"
-        echo -e "   HTTPS: https://${container_ip}:9443"
-        echo -e "   HTTP:  http://${container_ip}:9000 (if enabled)"
-        echo
-        echo -e "${GREEN}🔧 First-time setup:${NC}"
-        echo -e "   1. Open https://${container_ip}:9443 in your browser"
-        echo -e "   2. Create admin user account"
-        echo -e "   3. Start managing your Docker environment!"
-        echo
-        echo -e "${YELLOW}📝 Note: You may need to adjust firewall rules if you can't access the web interface.${NC}"
+        # Check if Portainer is running
+        if pct exec $CTID -- docker ps | grep -q portainer; then
+            log "SUCCESS" "Portainer CE installed successfully"
+            
+            # Get container IP for Portainer access
+            log "INFO" "Getting container network information..."
+            local container_ip=$(pct exec $CTID -- hostname -I | awk '{print $1}')
+            
+            echo
+            echo -e "${GREEN}🎉 PORTAINER INSTALLATION COMPLETE!${NC}"
+            echo -e "${YELLOW}================================${NC}"
+            echo -e "${GREEN}🌐 Portainer Web UI:${NC}"
+            echo -e "   HTTPS: https://${container_ip}:9443"
+            echo -e "   HTTP:  http://${container_ip}:9000"
+            echo
+            echo -e "${GREEN}🔧 First-time setup:${NC}"
+            echo -e "   1. Open https://${container_ip}:9443 in your browser"
+            echo -e "   2. Create admin user account"
+            echo -e "   3. Start managing your Docker environment!"
+            echo
+            echo -e "${YELLOW}📝 Note: You may need to adjust firewall rules if you can't access the web interface.${NC}"
+        else
+            log "ERROR" "Portainer failed to start"
+        fi
     fi
     
     # Test GPU with Docker
@@ -869,21 +929,28 @@ install_docker_stack() {
     if pct exec $CTID -- docker run --rm --runtime=nvidia --gpus all nvidia/cuda:11.0-base nvidia-smi; then
         log "SUCCESS" "✅ GPU access in Docker is working!"
     else
-        log "WARNING" "GPU test in Docker failed, but installation completed"
+        log "WARNING" "GPU test in Docker failed. Testing alternative method..."
+        
+        # Try alternative method
+        if pct exec $CTID -- docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi; then
+            log "SUCCESS" "✅ GPU access in Docker is working (alternative method)!"
+        else
+            log "WARNING" "GPU access test failed. Docker installation completed but GPU may need manual configuration."
+        fi
     fi
     
     # Final instructions
     echo
     echo -e "${GREEN}✅ Docker stack installation completed!${NC}"
     echo -e "${YELLOW}Available commands:${NC}"
-    echo -e "   docker --version"
-    echo -e "   docker-compose --version"
+    pct exec $CTID -- docker --version && echo -e "   ✅ docker --version"
+    pct exec $CTID -- which docker-compose >/dev/null 2>&1 && pct exec $CTID -- docker-compose --version && echo -e "   ✅ docker-compose --version"
     echo -e "   docker ps"
     echo
     echo -e "${YELLOW}To run Docker containers with GPU:${NC}"
-    echo -e "   docker run --runtime=nvidia --gpus all your-image"
+    echo -e "   docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi"
     echo -e "   or"
-    echo -e "   docker run --gpus all your-image"
+    echo -e "   docker run --rm --runtime=nvidia --gpus all nvidia/cuda:11.0-base nvidia-smi"
     
     return 0
 }
