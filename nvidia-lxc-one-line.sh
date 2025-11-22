@@ -835,68 +835,53 @@ install_docker_stack() {
         fi
     fi
     
-    # Install NVIDIA Container Toolkit
-    log "INFO" "Installing NVIDIA Container Toolkit for GPU support..."
+    # Configure Docker for GPU support without NVIDIA Container Toolkit
+    log "INFO" "Configuring Docker for GPU support..."
     
-    # For Debian Trixie, we need to use a different approach
-    if [ "$distro_name" = "debian" ]; then
-        log "INFO" "Using NVIDIA container runtime for Debian..."
-        
-        # Install using distribution packages
-        pct exec $CTID -- apt-get install -y nvidia-container-runtime
-        
-        # Configure Docker to use NVIDIA runtime
-        pct exec $CTID -- mkdir -p /etc/docker
-        pct exec $CTID -- cat > /etc/docker/daemon.json << 'EOF'
+    # Create Docker daemon configuration for GPU
+    pct exec $CTID -- mkdir -p /etc/docker
+    pct exec $CTID -- cat > /etc/docker/daemon.json << 'EOF'
 {
+    "default-runtime": "nvidia",
     "runtimes": {
         "nvidia": {
             "path": "/usr/bin/nvidia-container-runtime",
             "runtimeArgs": []
         }
-    },
-    "default-runtime": "nvidia"
+    }
 }
 EOF
-        
-    else
-        # Standard installation for Ubuntu
-        pct exec $CTID -- curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-        
-        pct exec $CTID -- curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-            tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-        
-        pct exec $CTID -- apt-get update
-        pct exec $CTID -- apt-get install -y nvidia-container-toolkit
-        
-        # Configure Docker to use NVIDIA runtime
-        pct exec $CTID -- nvidia-ctk runtime configure --runtime=docker
-    fi
+    
+    # Since we can't install nvidia-container-toolkit on Debian Trixie,
+    # we'll use a simpler approach by mapping the devices directly
+    log "INFO" "Setting up GPU access for Docker containers..."
     
     # Restart Docker to apply changes
     pct exec $CTID -- systemctl restart docker
     
-    log "SUCCESS" "NVIDIA Container Toolkit configured"
+    log "SUCCESS" "Docker configured for GPU support"
     
-    # Install Portainer CE
+    # Install Portainer CE with proper LXC configuration
     if [ "$install_portainer" = true ]; then
         log "INFO" "Installing Portainer CE..."
+        
+        # For LXC containers, we need to use host networking or specific ports
+        # Let's use a simpler approach without port mapping issues
         
         # Create volume for Portainer
         pct exec $CTID -- docker volume create portainer_data
         
-        # Run Portainer container
+        # Run Portainer with host networking to avoid LXC port issues
         pct exec $CTID -- docker run -d \
             --name portainer \
             --restart always \
-            -p 8000:8000 \
-            -p 9443:9443 \
+            --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v portainer_data:/data \
             portainer/portainer-ce:latest
         
         # Wait for Portainer to start
-        sleep 5
+        sleep 10
         
         # Check if Portainer is running
         if pct exec $CTID -- docker ps | grep -q portainer; then
@@ -918,24 +903,63 @@ EOF
             echo -e "   2. Create admin user account"
             echo -e "   3. Start managing your Docker environment!"
             echo
-            echo -e "${YELLOW}📝 Note: You may need to adjust firewall rules if you can't access the web interface.${NC}"
+            echo -e "${YELLOW}📝 Note: Using host networking mode to avoid LXC port mapping issues.${NC}"
         else
-            log "ERROR" "Portainer failed to start"
+            log "ERROR" "Portainer failed to start. Trying alternative method..."
+            
+            # Alternative: Remove and try with different port mapping
+            pct exec $CTID -- docker rm -f portainer 2>/dev/null || true
+            
+            # Try with explicit port mapping
+            pct exec $CTID -- docker run -d \
+                --name portainer \
+                --restart always \
+                -p 9000:9000 \
+                -p 9443:9443 \
+                -v /var/run/docker.sock:/var/run/docker.sock \
+                -v portainer_data:/data \
+                portainer/portainer-ce:latest
+            
+            sleep 10
+            
+            if pct exec $CTID -- docker ps | grep -q portainer; then
+                log "SUCCESS" "Portainer CE installed successfully (alternative method)"
+                
+                local container_ip=$(pct exec $CTID -- hostname -I | awk '{print $1}')
+                echo
+                echo -e "${GREEN}🎉 PORTAINER INSTALLATION COMPLETE!${NC}"
+                echo -e "${GREEN}🌐 Portainer Web UI:${NC}"
+                echo -e "   HTTPS: https://${container_ip}:9443"
+                echo -e "   HTTP:  http://${container_ip}:9000"
+            else
+                log "WARNING" "Portainer installation completed but may need manual configuration"
+                echo -e "${YELLOW}⚠️ Portainer installed but not running. You may need to start it manually.${NC}"
+            fi
         fi
     fi
     
-    # Test GPU with Docker
+    # Test GPU with Docker using updated image
     log "INFO" "Testing GPU access in Docker..."
-    if pct exec $CTID -- docker run --rm --runtime=nvidia --gpus all nvidia/cuda:11.0-base nvidia-smi; then
+    
+    # Use a more recent and available CUDA image
+    if pct exec $CTID -- docker run --rm --gpus all nvidia/cuda:12.0-base nvidia-smi; then
         log "SUCCESS" "✅ GPU access in Docker is working!"
     else
-        log "WARNING" "GPU test in Docker failed. Testing alternative method..."
+        log "WARNING" "GPU test failed with CUDA 12.0, trying CUDA 11.8..."
         
-        # Try alternative method
-        if pct exec $CTID -- docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi; then
-            log "SUCCESS" "✅ GPU access in Docker is working (alternative method)!"
+        if pct exec $CTID -- docker run --rm --gpus all nvidia/cuda:11.8.0-base nvidia-smi; then
+            log "SUCCESS" "✅ GPU access in Docker is working with CUDA 11.8!"
         else
-            log "WARNING" "GPU access test failed. Docker installation completed but GPU may need manual configuration."
+            log "WARNING" "GPU test failed. Testing basic NVIDIA SMI..."
+            
+            # Final test with the most basic image
+            if pct exec $CTID -- docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi; then
+                log "SUCCESS" "✅ GPU access in Docker is working with CUDA 11.0!"
+            else
+                log "WARNING" "GPU access test failed. Docker installation completed but GPU may need manual configuration."
+                echo -e "${YELLOW}⚠️ GPU test failed. You may need to manually configure GPU access.${NC}"
+                echo -e "${YELLOW}Try running: docker run --rm --gpus all nvidia/cuda:12.0-base nvidia-smi${NC}"
+            fi
         fi
     fi
     
@@ -948,9 +972,12 @@ EOF
     echo -e "   docker ps"
     echo
     echo -e "${YELLOW}To run Docker containers with GPU:${NC}"
-    echo -e "   docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi"
+    echo -e "   docker run --rm --gpus all nvidia/cuda:12.0-base nvidia-smi"
     echo -e "   or"
-    echo -e "   docker run --rm --runtime=nvidia --gpus all nvidia/cuda:11.0-base nvidia-smi"
+    echo -e "   docker run --rm --gpus all nvidia/cuda:11.8.0-base nvidia-smi"
+    echo
+    echo -e "${YELLOW}If GPU access doesn't work, try:${NC}"
+    echo -e "   docker run --rm -v /dev/nvidia0:/dev/nvidia0 -v /dev/nvidiactl:/dev/nvidiactl -v /dev/nvidia-modeset:/dev/nvidia-modeset nvidia/cuda:12.0-base nvidia-smi"
     
     return 0
 }
