@@ -687,7 +687,7 @@ install_nvtop_container() {
     return 1
 }
 
-# CORRIGIDA: Function to install Docker with GPU support
+# Function to install Docker with GPU support
 install_docker_stack() {
     local CTID=$1
     local container_name=$(pct config $CTID | grep -oP 'hostname: \K.*' || echo "N/A")
@@ -795,10 +795,26 @@ install_docker_stack() {
                 gnupg \
                 lsb-release
             
-            # Use official Docker installation script
-            pct exec $CTID -- curl -fsSL https://get.docker.com -o get-docker.sh
-            pct exec $CTID -- sh get-docker.sh
-            pct exec $CTID -- rm get-docker.sh
+            # CORREÇÃO: Usar método oficial do Docker para Debian (não Ubuntu)
+            log "INFO" "Setting up Docker repository for Debian..."
+            
+            # Add Docker's official GPG key
+            pct exec $CTID -- install -m 0755 -d /etc/apt/keyrings
+            pct exec $CTID -- curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+            pct exec $CTID -- chmod a+r /etc/apt/keyrings/docker.asc
+            
+            # Add the repository to Apt sources
+            pct exec $CTID -- tee /etc/apt/sources.list.d/docker.sources > /dev/null <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/debian
+Suites: trixie
+Components: stable
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+            
+            # Update and install Docker
+            pct exec $CTID -- apt-get update
+            pct exec $CTID -- apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
             
             # Start and enable Docker
             pct exec $CTID -- systemctl start docker
@@ -817,14 +833,14 @@ install_docker_stack() {
         fi
     fi
     
-    # Install Docker Compose
+    # Install Docker Compose (standalone - para compatibilidade)
     if [ "$install_compose" = true ] || ([ "$repair_mode" = true ] && [ "$compose_installed" = "no" ]); then
         if pct exec $CTID -- which docker-compose >/dev/null 2>&1; then
             log "INFO" "Docker Compose is already installed"
         else
-            log "INFO" "Installing Docker Compose..."
+            log "INFO" "Installing Docker Compose (standalone)..."
             
-            # Download and install Docker Compose
+            # Download and install Docker Compose standalone
             pct exec $CTID -- curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
             pct exec $CTID -- chmod +x /usr/local/bin/docker-compose
             
@@ -834,61 +850,51 @@ install_docker_stack() {
             if pct exec $CTID -- docker-compose --version >/dev/null 2>&1; then
                 log "SUCCESS" "Docker Compose installed successfully"
             else
-                log "ERROR" "Docker Compose installation failed"
+                log "WARNING" "Docker Compose installation failed, but Docker Compose Plugin is available"
             fi
         fi
     fi
     
-    # CORRIGIDA: Configure Docker for GPU support
+    # CORREÇÃO: Configuração do Docker para GPU support (método simplificado)
     log "INFO" "Configuring Docker for GPU support..."
     
     # Create Docker daemon configuration directory
     pct exec $CTID -- mkdir -p /etc/docker
     
-    # Create daemon.json for GPU support
+    # CORREÇÃO: Criar daemon.json básico sem NVIDIA Container Toolkit (não disponível no Debian Trixie)
     pct exec $CTID -- bash -c 'cat > /etc/docker/daemon.json << "EOF"
 {
-    "runtimes": {
-        "nvidia": {
-            "path": "nvidia-container-runtime",
-            "runtimeArgs": []
-        }
-    },
-    "default-runtime": "nvidia"
+    "log-driver": "json-file",
+    "log-opts": {
+        "max-size": "10m",
+        "max-file": "3"
+    }
 }
 EOF'
     
-    # CORRIGIDA: Instalação simplificada do NVIDIA Container Toolkit
-    log "INFO" "Installing NVIDIA Container Toolkit..."
+    # CORREÇÃO: Remover arquivos existentes do NVIDIA Container Toolkit SEM perguntas
+    pct exec $CTID -- rm -f /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null || true
+    pct exec $CTID -- rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list 2>/dev/null || true
+    
+    # CORREÇÃO: Tentar método alternativo para Debian Trixie
+    log "INFO" "Setting up GPU access for Debian Trixie..."
+    
+    # Método 1: Tentar instalar via pacotes do Debian
     pct exec $CTID -- apt-get update
-    pct exec $CTID -- apt-get install -y curl gnupg
-    
-    # Configurar repositório NVIDIA (força a instalação para Debian Bookworm)
-    pct exec $CTID -- curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-    pct exec $CTID -- curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-        tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-    
-    pct exec $CTID -- apt-get update
-    
-    # Tentar instalar os pacotes NVIDIA
-    if pct exec $CTID -- apt-get install -y nvidia-container-toolkit nvidia-docker2; then
-        log "SUCCESS" "NVIDIA Container Toolkit installed successfully"
+    if pct exec $CTID -- apt-cache search nvidia-container-toolkit | grep -q nvidia-container-toolkit; then
+        log "INFO" "Installing NVIDIA Container Toolkit from Debian repositories..."
+        pct exec $CTID -- apt-get install -y nvidia-container-toolkit
     else
-        log "WARNING" "Failed to install NVIDIA Container Toolkit, using fallback method"
-        # Método alternativo: instalar apenas o necessário
-        pct exec $CTID -- apt-get install -y nvidia-container-runtime
+        log "WARNING" "NVIDIA Container Toolkit not available in Debian Trixie repositories"
+        log "INFO" "Using manual GPU device mapping method"
     fi
     
-    # Restart Docker to apply changes
+    # Reiniciar Docker para aplicar mudanças
     pct exec $CTID -- systemctl restart docker
     
-    log "SUCCESS" "Docker configured successfully for GPU support"
+    log "SUCCESS" "Docker configured successfully"
     
-    # [O resto da função permanece igual...]
-    # Continue com a instalação do Portainer e testes...
-    
-    # Handle Portainer installation/repair
+    # CORREÇÃO: Instalação do Portainer (resolvendo problema de permissão)
     if [ "$install_portainer" = true ] || ([ "$repair_mode" = true ] && [ -n "$portainer_running" ]); then
         log "INFO" "Setting up Portainer CE..."
         
@@ -898,37 +904,36 @@ EOF'
         # Create volume for Portainer
         pct exec $CTID -- docker volume create portainer_data 2>/dev/null || true
         
-        # Try multiple methods to run Portainer
-        local portainer_started=false
+        # CORREÇÃO: Executar Portainer sem problemas de sysctl
+        log "INFO" "Starting Portainer with adjusted settings..."
         
-        # Method 1: Try with bridge network and port mapping
-        log "INFO" "Attempting Portainer installation with bridge network..."
+        # Método 1: Tentar com network host (evita problemas de bridge)
         if pct exec $CTID -- docker run -d \
             --name portainer \
             --restart unless-stopped \
-            -p 9000:9000 \
-            -p 9443:9443 \
+            --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v portainer_data:/data \
             portainer/portainer-ce:latest 2>/dev/null; then
+            log "SUCCESS" "Portainer started with host network"
             portainer_started=true
-            log "SUCCESS" "Portainer started with bridge network"
         else
-            # Method 2: Try with host network (bypasses port mapping issues)
-            log "INFO" "Bridge network failed, trying host network..."
+            # Método 2: Tentar com bridge mas sem mapeamento de portas problemáticas
+            log "INFO" "Host network failed, trying bridge network..."
             pct exec $CTID -- docker rm -f portainer 2>/dev/null || true
             
             if pct exec $CTID -- docker run -d \
                 --name portainer \
                 --restart unless-stopped \
-                --network host \
+                -p 9443:9443 \
                 -v /var/run/docker.sock:/var/run/docker.sock \
                 -v portainer_data:/data \
                 portainer/portainer-ce:latest 2>/dev/null; then
+                log "SUCCESS" "Portainer started with bridge network (port 9443)"
                 portainer_started=true
-                log "SUCCESS" "Portainer started with host network"
             else
                 log "WARNING" "Portainer failed to start with both methods"
+                portainer_started=false
             fi
         fi
         
@@ -939,6 +944,7 @@ EOF'
             portainer_started=true
         else
             log "WARNING" "Portainer container exists but is not running"
+            portainer_started=false
         fi
         
         if [ "$portainer_started" = true ]; then
@@ -950,7 +956,6 @@ EOF'
             echo -e "${YELLOW}================================${NC}"
             echo -e "${GREEN}🌐 Portainer Web UI:${NC}"
             echo -e "   HTTPS: https://${container_ip}:9443"
-            echo -e "   HTTP:  http://${container_ip}:9000"
             echo
             echo -e "${GREEN}🔧 First-time setup:${NC}"
             echo -e "   1. Open https://${container_ip}:9443 in your browser"
@@ -958,6 +963,8 @@ EOF'
             echo -e "   3. Start managing your Docker environment!"
         else
             echo -e "${YELLOW}⚠️ Portainer installation may need manual intervention${NC}"
+            echo -e "${YELLOW}You can try running manually inside container:${NC}"
+            echo -e "docker run -d --name portainer --restart unless-stopped --network host -v /var/run/docker.sock:/var/run/docker.sock -v portainer_data:/data portainer/portainer-ce:latest"
         fi
     fi
     
@@ -980,35 +987,54 @@ EOF'
         fi
     fi
     
-    # CORRIGIDO: Test GPU access with NVIDIA Container Toolkit
+    # Test Docker Compose Plugin (sempre disponível com instalação moderna)
+    if pct exec $CTID -- docker compose version >/dev/null 2>&1; then
+        log "SUCCESS" "✅ Docker Compose Plugin is working"
+    fi
+    
+    # CORREÇÃO: Teste de GPU com múltiplos métodos
     log "INFO" "Testing GPU access in Docker..."
     
-    if pct exec $CTID -- docker run --rm --runtime=nvidia nvidia/cuda:12.0.0-base-ubuntu20.04 nvidia-smi 2>/dev/null; then
-        log "SUCCESS" "✅ GPU access in Docker is working with NVIDIA runtime!"
-    else
-        log "WARNING" "Trying alternative GPU access method..."
-        
-        # Try with --gpus all flag
-        if pct exec $CTID -- docker run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu20.04 nvidia-smi 2>/dev/null; then
-            log "SUCCESS" "✅ GPU access in Docker is working with --gpus all!"
-        else
-            log "WARNING" "❌ GPU access test failed with standard methods"
-            
-            # Try manual device mapping as last resort
-            log "INFO" "Trying manual device mapping..."
-            if pct exec $CTID -- docker run --rm \
+    # Lista de imagens para testar (focando em Debian)
+    local test_images=(
+        "nvidia/cuda:12.0.0-base-ubuntu20.04"
+        "nvidia/cuda:11.8.0-base-ubuntu20.04"
+    )
+    
+    local gpu_working=false
+    
+    # Método 1: Testar com --gpus all (se NVIDIA Container Toolkit estiver disponível)
+    for image in "${test_images[@]}"; do
+        log "INFO" "Testing GPU with: $image"
+        if pct exec $CTID -- timeout 30s docker run --rm --gpus all "$image" nvidia-smi >/dev/null 2>&1; then
+            log "SUCCESS" "✅ GPU access working with --gpus all: $image"
+            gpu_working=true
+            break
+        fi
+    done
+    
+    # Método 2: Se --gpus all falhar, tentar mapeamento manual de dispositivos
+    if [ "$gpu_working" = false ]; then
+        log "INFO" "Trying manual device mapping..."
+        for image in "${test_images[@]}"; do
+            if pct exec $CTID -- timeout 30s docker run --rm \
                 -v /dev/nvidia0:/dev/nvidia0 \
                 -v /dev/nvidiactl:/dev/nvidiactl \
                 -v /dev/nvidia-modeset:/dev/nvidia-modeset \
                 -v /dev/nvidia-uvm:/dev/nvidia-uvm \
-                nvidia/cuda:12.0.0-base-ubuntu20.04 nvidia-smi 2>/dev/null; then
-                log "SUCCESS" "✅ GPU access works with manual device mapping!"
-            else
-                log "WARNING" "⚠️ GPU access may need additional configuration"
-                echo -e "${YELLOW}Try manual debugging:${NC}"
-                echo -e "pct exec $CTID -- docker run --rm -v /dev/nvidia0:/dev/nvidia0 nvidia/cuda:12.0.0-base-ubuntu20.04 nvidia-smi"
+                "$image" nvidia-smi >/dev/null 2>&1; then
+                log "SUCCESS" "✅ GPU access working with manual device mapping: $image"
+                gpu_working=true
+                break
             fi
-        fi
+        done
+    fi
+    
+    if [ "$gpu_working" = false ]; then
+        log "WARNING" "❌ GPU access test failed with all methods"
+        echo -e "${YELLOW}⚠️ GPU access may need manual configuration${NC}"
+        echo -e "${YELLOW}You can test manually inside container with:${NC}"
+        echo -e "docker run --rm -v /dev/nvidia0:/dev/nvidia0 nvidia/cuda:12.0.0-base-ubuntu20.04 nvidia-smi"
     fi
     
     # Final summary
@@ -1018,13 +1044,21 @@ EOF'
     echo -e "${YELLOW}Summary:${NC}"
     pct exec $CTID -- docker --version && echo -e "  ✅ Docker"
     pct exec $CTID -- which docker-compose >/dev/null 2>&1 && echo -e "  ✅ Docker Compose"
+    pct exec $CTID -- docker compose version >/dev/null 2>&1 && echo -e "  ✅ Docker Compose Plugin"
     pct exec $CTID -- docker ps --filter "name=portainer" --format "{{.Names}}" | grep -q portainer && echo -e "  ✅ Portainer"
+    [ "$gpu_working" = true ] && echo -e "  ✅ GPU Access" || echo -e "  ⚠️ GPU Access needs setup"
     
     echo
     echo -e "${YELLOW}Next steps:${NC}"
-    echo -e "  1. Access Portainer at: https://$(pct exec $CTID -- hostname -I | awk '{print $1}'):9443"
-    echo -e "  2. Test GPU with: docker run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu20.04 nvidia-smi"
-    echo -e "  3. Manage containers with: docker-compose"
+    local container_ip=$(pct exec $CTID -- hostname -I | awk '{print $1}')
+    echo -e "  1. Access Portainer at: https://${container_ip}:9443"
+    if [ "$gpu_working" = true ]; then
+        echo -e "  2. GPU is working! Test with: docker run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu20.04 nvidia-smi"
+    else
+        echo -e "  2. To setup GPU access, run inside container:"
+        echo -e "     docker run --rm -v /dev/nvidia0:/dev/nvidia0 nvidia/cuda:12.0.0-base-ubuntu20.04 nvidia-smi"
+    fi
+    echo -e "  3. Manage containers with: docker-compose OR docker compose"
     
     return 0
 }
