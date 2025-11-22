@@ -710,33 +710,55 @@ install_docker_stack() {
     
     log "SUCCESS" "GPU is accessible in container"
     
-    # Installation choices
+    # Check what's already installed
+    log "INFO" "Checking existing installations..."
+    local docker_installed=$(pct exec $CTID -- which docker >/dev/null 2>&1 && echo "yes" || echo "no")
+    local compose_installed=$(pct exec $CTID -- which docker-compose >/dev/null 2>&1 && echo "yes" || echo "no")
+    local portainer_running=$(pct exec $CTID -- docker ps --filter "name=portainer" --format "{{.Names}}" 2>/dev/null)
+    
     echo
-    echo -e "${YELLOW}Select components to install:${NC}"
+    echo -e "${YELLOW}Current Installation Status:${NC}"
+    echo "  Docker: $docker_installed"
+    echo "  Docker Compose: $compose_installed"
+    echo "  Portainer: ${portainer_running:-not running}"
+    echo
+    
+    # Installation choices
+    echo -e "${YELLOW}Select components to install/repair:${NC}"
     echo "1) Docker + Docker Compose + Portainer CE (Full stack)"
     echo "2) Docker only"
-    echo "3) Docker + Docker Compose"
-    echo "4) Cancel"
+    echo "3) Docker + Docker Compose" 
+    echo "4) Repair existing installation"
+    echo "5) Cancel"
     
-    read -p "Choose option [1-4]: " docker_choice
+    read -p "Choose option [1-5]: " docker_choice
     
     case $docker_choice in
         1)
             install_docker=true
             install_compose=true
             install_portainer=true
+            repair_mode=false
             ;;
         2)
             install_docker=true
             install_compose=false
             install_portainer=false
+            repair_mode=false
             ;;
         3)
             install_docker=true
             install_compose=true
             install_portainer=false
+            repair_mode=false
             ;;
         4)
+            install_docker=false
+            install_compose=false
+            install_portainer=false
+            repair_mode=true
+            ;;
+        5)
             log "INFO" "Docker installation cancelled"
             return 0
             ;;
@@ -747,148 +769,153 @@ install_docker_stack() {
     esac
     
     # Start installation
-    log "INFO" "Starting Docker stack installation..."
+    if [ "$repair_mode" = true ]; then
+        log "INFO" "Starting Docker stack repair..."
+    else
+        log "INFO" "Starting Docker stack installation..."
+    fi
     
-    # Update system
-    log "INFO" "Updating package list..."
-    pct exec $CTID -- apt-get update
-    
-    # Install prerequisites
-    log "INFO" "Installing prerequisites..."
-    pct exec $CTID -- apt-get install -y \
-        ca-certificates \
-        curl \
-        gnupg \
-        lsb-release
-    
-    # Detect distribution and version
-    log "INFO" "Detecting distribution..."
-    local distro_info=$(pct exec $CTID -- cat /etc/os-release)
-    local distro_name=$(echo "$distro_info" | grep -oP '^ID=\K\w+' | head -1)
-    local distro_version=$(echo "$distro_info" | grep -oP '^VERSION_ID="?\K[\w\.]+' | head -1)
-    
-    log "INFO" "Detected: $distro_name $distro_version"
-    
-    # Install Docker based on distribution
-    if [ "$install_docker" = true ]; then
-        log "INFO" "Installing Docker..."
-        
-        if [ "$distro_name" = "ubuntu" ]; then
-            # Ubuntu installation
-            pct exec $CTID -- mkdir -p /etc/apt/keyrings
-            pct exec $CTID -- curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-            
-            pct exec $CTID -- echo \
-                "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-                $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-            
-            pct exec $CTID -- apt-get update
-            pct exec $CTID -- apt-get install -y docker-ce docker-ce-cli containerd.io
-            
-        elif [ "$distro_name" = "debian" ]; then
-            # Debian installation - use official Docker script for compatibility
-            log "INFO" "Using Docker official installation script for Debian..."
-            pct exec $CTID -- curl -fsSL https://get.docker.com -o get-docker.sh
-            pct exec $CTID -- sh get-docker.sh
-            pct exec $CTID -- rm get-docker.sh
-        else
-            log "ERROR" "Unsupported distribution: $distro_name"
-            return 1
-        fi
-        
-        # Start and enable Docker
-        pct exec $CTID -- systemctl start docker
-        pct exec $CTID -- systemctl enable docker
-        
-        # Add users to docker group
-        pct exec $CTID -- getent passwd ubuntu >/dev/null 2>&1 && pct exec $CTID -- usermod -aG docker ubuntu
-        pct exec $CTID -- getent passwd admin >/dev/null 2>&1 && pct exec $CTID -- usermod -aG docker admin
-        pct exec $CTID -- usermod -aG docker root
-        
-        # Verify Docker installation
+    # Install Docker if requested or in repair mode and Docker is broken
+    if [ "$install_docker" = true ] || [ "$repair_mode" = true ]; then
+        # Check if Docker is already working
         if pct exec $CTID -- docker --version >/dev/null 2>&1; then
-            log "SUCCESS" "Docker installed successfully"
+            log "INFO" "Docker is already installed and working"
             local docker_version=$(pct exec $CTID -- docker --version)
             log "INFO" "Docker version: $docker_version"
         else
-            log "ERROR" "Docker installation failed"
-            return 1
+            log "INFO" "Installing/Repairing Docker..."
+            
+            # Update system
+            pct exec $CTID -- apt-get update
+            
+            # Install prerequisites
+            pct exec $CTID -- apt-get install -y \
+                ca-certificates \
+                curl \
+                gnupg \
+                lsb-release
+            
+            # Use official Docker installation script
+            pct exec $CTID -- curl -fsSL https://get.docker.com -o get-docker.sh
+            pct exec $CTID -- sh get-docker.sh
+            pct exec $CTID -- rm get-docker.sh
+            
+            # Start and enable Docker
+            pct exec $CTID -- systemctl start docker
+            pct exec $CTID -- systemctl enable docker
+            
+            # Add users to docker group
+            pct exec $CTID -- usermod -aG docker root
+            
+            # Verify installation
+            if pct exec $CTID -- docker --version >/dev/null 2>&1; then
+                log "SUCCESS" "Docker installed/repaired successfully"
+            else
+                log "ERROR" "Docker installation failed"
+                return 1
+            fi
         fi
     fi
     
     # Install Docker Compose
-    if [ "$install_compose" = true ]; then
-        log "INFO" "Installing Docker Compose..."
-        
-        # Download and install Docker Compose
-        pct exec $CTID -- curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-        pct exec $CTID -- chmod +x /usr/local/bin/docker-compose
-        
-        # Create symbolic link
-        pct exec $CTID -- ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
-        
-        # Verify installation
-        if pct exec $CTID -- docker-compose --version >/dev/null 2>&1; then
-            log "SUCCESS" "Docker Compose installed successfully"
+    if [ "$install_compose" = true ] || ([ "$repair_mode" = true ] && [ "$compose_installed" = "no" ]); then
+        if pct exec $CTID -- which docker-compose >/dev/null 2>&1; then
+            log "INFO" "Docker Compose is already installed"
         else
-            log "ERROR" "Docker Compose installation failed"
+            log "INFO" "Installing Docker Compose..."
+            
+            # Download and install Docker Compose
+            pct exec $CTID -- curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+            pct exec $CTID -- chmod +x /usr/local/bin/docker-compose
+            
+            # Create symbolic link
+            pct exec $CTID -- ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
+            
+            if pct exec $CTID -- docker-compose --version >/dev/null 2>&1; then
+                log "SUCCESS" "Docker Compose installed successfully"
+            else
+                log "ERROR" "Docker Compose installation failed"
+            fi
         fi
     fi
     
-    # Configure Docker for GPU support without NVIDIA Container Toolkit
+    # Configure Docker for GPU support
     log "INFO" "Configuring Docker for GPU support..."
     
-    # Create Docker daemon configuration for GPU
+    # Create Docker daemon configuration directory
     pct exec $CTID -- mkdir -p /etc/docker
+    
+    # Create basic daemon.json without nvidia runtime (since we can't install the toolkit)
     pct exec $CTID -- cat > /etc/docker/daemon.json << 'EOF'
 {
-    "default-runtime": "nvidia",
-    "runtimes": {
-        "nvidia": {
-            "path": "/usr/bin/nvidia-container-runtime",
-            "runtimeArgs": []
-        }
+    "log-driver": "json-file",
+    "log-opts": {
+        "max-size": "10m",
+        "max-file": "3"
     }
 }
 EOF
     
-    # Since we can't install nvidia-container-toolkit on Debian Trixie,
-    # we'll use a simpler approach by mapping the devices directly
-    log "INFO" "Setting up GPU access for Docker containers..."
-    
     # Restart Docker to apply changes
     pct exec $CTID -- systemctl restart docker
     
-    log "SUCCESS" "Docker configured for GPU support"
+    log "SUCCESS" "Docker configured successfully"
     
-    # Install Portainer CE with proper LXC configuration
-    if [ "$install_portainer" = true ]; then
-        log "INFO" "Installing Portainer CE..."
+    # Handle Portainer installation/repair
+    if [ "$install_portainer" = true ] || ([ "$repair_mode" = true ] && [ -n "$portainer_running" ]); then
+        log "INFO" "Setting up Portainer CE..."
         
-        # For LXC containers, we need to use host networking or specific ports
-        # Let's use a simpler approach without port mapping issues
+        # Clean up any existing Portainer containers
+        pct exec $CTID -- docker rm -f portainer 2>/dev/null || true
         
         # Create volume for Portainer
-        pct exec $CTID -- docker volume create portainer_data
+        pct exec $CTID -- docker volume create portainer_data 2>/dev/null || true
         
-        # Run Portainer with host networking to avoid LXC port issues
-        pct exec $CTID -- docker run -d \
+        # Try multiple methods to run Portainer
+        local portainer_started=false
+        
+        # Method 1: Try with bridge network and port mapping
+        log "INFO" "Attempting Portainer installation with bridge network..."
+        if pct exec $CTID -- docker run -d \
             --name portainer \
-            --restart always \
-            --network host \
+            --restart unless-stopped \
+            -p 9000:9000 \
+            -p 9443:9443 \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v portainer_data:/data \
-            portainer/portainer-ce:latest
-        
-        # Wait for Portainer to start
-        sleep 10
-        
-        # Check if Portainer is running
-        if pct exec $CTID -- docker ps | grep -q portainer; then
-            log "SUCCESS" "Portainer CE installed successfully"
+            portainer/portainer-ce:latest 2>/dev/null; then
+            portainer_started=true
+            log "SUCCESS" "Portainer started with bridge network"
+        else
+            # Method 2: Try with host network (bypasses port mapping issues)
+            log "INFO" "Bridge network failed, trying host network..."
+            pct exec $CTID -- docker rm -f portainer 2>/dev/null || true
             
+            if pct exec $CTID -- docker run -d \
+                --name portainer \
+                --restart unless-stopped \
+                --network host \
+                -v /var/run/docker.sock:/var/run/docker.sock \
+                -v portainer_data:/data \
+                portainer/portainer-ce:latest 2>/dev/null; then
+                portainer_started=true
+                log "SUCCESS" "Portainer started with host network"
+            else
+                log "WARNING" "Portainer failed to start with both methods"
+            fi
+        fi
+        
+        # Wait and check if Portainer is running
+        sleep 5
+        if pct exec $CTID -- docker ps --filter "name=portainer" --format "{{.Status}}" | grep -q "Up"; then
+            log "SUCCESS" "Portainer CE is running"
+            portainer_started=true
+        else
+            log "WARNING" "Portainer container exists but is not running"
+        fi
+        
+        if [ "$portainer_started" = true ]; then
             # Get container IP for Portainer access
-            log "INFO" "Getting container network information..."
             local container_ip=$(pct exec $CTID -- hostname -I | awk '{print $1}')
             
             echo
@@ -902,82 +929,78 @@ EOF
             echo -e "   1. Open https://${container_ip}:9443 in your browser"
             echo -e "   2. Create admin user account"
             echo -e "   3. Start managing your Docker environment!"
-            echo
-            echo -e "${YELLOW}📝 Note: Using host networking mode to avoid LXC port mapping issues.${NC}"
         else
-            log "ERROR" "Portainer failed to start. Trying alternative method..."
-            
-            # Alternative: Remove and try with different port mapping
-            pct exec $CTID -- docker rm -f portainer 2>/dev/null || true
-            
-            # Try with explicit port mapping
-            pct exec $CTID -- docker run -d \
-                --name portainer \
-                --restart always \
-                -p 9000:9000 \
-                -p 9443:9443 \
-                -v /var/run/docker.sock:/var/run/docker.sock \
-                -v portainer_data:/data \
-                portainer/portainer-ce:latest
-            
-            sleep 10
-            
-            if pct exec $CTID -- docker ps | grep -q portainer; then
-                log "SUCCESS" "Portainer CE installed successfully (alternative method)"
-                
-                local container_ip=$(pct exec $CTID -- hostname -I | awk '{print $1}')
-                echo
-                echo -e "${GREEN}🎉 PORTAINER INSTALLATION COMPLETE!${NC}"
-                echo -e "${GREEN}🌐 Portainer Web UI:${NC}"
-                echo -e "   HTTPS: https://${container_ip}:9443"
-                echo -e "   HTTP:  http://${container_ip}:9000"
-            else
-                log "WARNING" "Portainer installation completed but may need manual configuration"
-                echo -e "${YELLOW}⚠️ Portainer installed but not running. You may need to start it manually.${NC}"
-            fi
+            echo -e "${YELLOW}⚠️ Portainer installation may need manual intervention${NC}"
         fi
     fi
     
-    # Test GPU with Docker using updated image
+    # Test Docker functionality
+    log "INFO" "Testing Docker installation..."
+    
+    # Test basic Docker command
+    if pct exec $CTID -- docker --version >/dev/null 2>&1; then
+        log "SUCCESS" "✅ Docker is working"
+    else
+        log "ERROR" "❌ Docker is not working"
+    fi
+    
+    # Test Docker Compose if installed
+    if pct exec $CTID -- which docker-compose >/dev/null 2>&1; then
+        if pct exec $CTID -- docker-compose --version >/dev/null 2>&1; then
+            log "SUCCESS" "✅ Docker Compose is working"
+        else
+            log "WARNING" "⚠️ Docker Compose installed but not working"
+        fi
+    fi
+    
+    # Test GPU access with available CUDA images
     log "INFO" "Testing GPU access in Docker..."
     
-    # Use a more recent and available CUDA image
-    if pct exec $CTID -- docker run --rm --gpus all nvidia/cuda:12.0-base nvidia-smi; then
-        log "SUCCESS" "✅ GPU access in Docker is working!"
-    else
-        log "WARNING" "GPU test failed with CUDA 12.0, trying CUDA 11.8..."
-        
-        if pct exec $CTID -- docker run --rm --gpus all nvidia/cuda:11.8.0-base nvidia-smi; then
-            log "SUCCESS" "✅ GPU access in Docker is working with CUDA 11.8!"
-        else
-            log "WARNING" "GPU test failed. Testing basic NVIDIA SMI..."
-            
-            # Final test with the most basic image
-            if pct exec $CTID -- docker run --rm --gpus all nvidia/cuda:11.0-base nvidia-smi; then
-                log "SUCCESS" "✅ GPU access in Docker is working with CUDA 11.0!"
-            else
-                log "WARNING" "GPU access test failed. Docker installation completed but GPU may need manual configuration."
-                echo -e "${YELLOW}⚠️ GPU test failed. You may need to manually configure GPU access.${NC}"
-                echo -e "${YELLOW}Try running: docker run --rm --gpus all nvidia/cuda:12.0-base nvidia-smi${NC}"
-            fi
+    # List of CUDA images to try (most likely to work)
+    local cuda_images=(
+        "nvidia/cuda:12.0.0-base-ubuntu20.04"
+        "nvidia/cuda:11.8.0-base-ubuntu20.04" 
+        "nvidia/cuda:11.0.3-base-ubuntu20.04"
+        "nvidia/cuda:12.0.0-base"
+        "nvidia/cuda:11.8.0-base"
+    )
+    
+    local gpu_working=false
+    for image in "${cuda_images[@]}"; do
+        log "INFO" "Trying CUDA image: $image"
+        if pct exec $CTID -- docker run --rm --gpus all "$image" nvidia-smi 2>/dev/null; then
+            log "SUCCESS" "✅ GPU access in Docker is working with $image!"
+            gpu_working=true
+            break
         fi
+    done
+    
+    if [ "$gpu_working" = false ]; then
+        log "WARNING" "❌ GPU access test failed with standard images"
+        echo -e "${YELLOW}⚠️ GPU access may need manual configuration${NC}"
+        echo -e "${YELLOW}Try manual device mapping:${NC}"
+        echo -e "docker run --rm \\"
+        echo -e "  -v /dev/nvidia0:/dev/nvidia0 \\"
+        echo -e "  -v /dev/nvidiactl:/dev/nvidiactl \\"
+        echo -e "  -v /dev/nvidia-modeset:/dev/nvidia-modeset \\"
+        echo -e "  nvidia/cuda:12.0.0-base-ubuntu20.04 nvidia-smi"
     fi
     
-    # Final instructions
+    # Final summary
     echo
-    echo -e "${GREEN}✅ Docker stack installation completed!${NC}"
-    echo -e "${YELLOW}Available commands:${NC}"
-    pct exec $CTID -- docker --version && echo -e "   ✅ docker --version"
-    pct exec $CTID -- which docker-compose >/dev/null 2>&1 && pct exec $CTID -- docker-compose --version && echo -e "   ✅ docker-compose --version"
-    echo -e "   docker ps"
+    echo -e "${GREEN}✅ Docker stack installation/repair completed!${NC}"
     echo
-    echo -e "${YELLOW}To run Docker containers with GPU:${NC}"
-    echo -e "   docker run --rm --gpus all nvidia/cuda:12.0-base nvidia-smi"
-    echo -e "   or"
-    echo -e "   docker run --rm --gpus all nvidia/cuda:11.8.0-base nvidia-smi"
+    echo -e "${YELLOW}Summary:${NC}"
+    pct exec $CTID -- docker --version && echo -e "  ✅ Docker"
+    pct exec $CTID -- which docker-compose >/dev/null 2>&1 && echo -e "  ✅ Docker Compose"
+    pct exec $CTID -- docker ps --filter "name=portainer" --format "{{.Names}}" | grep -q portainer && echo -e "  ✅ Portainer"
+    [ "$gpu_working" = true ] && echo -e "  ✅ GPU Access"
+    
     echo
-    echo -e "${YELLOW}If GPU access doesn't work, try:${NC}"
-    echo -e "   docker run --rm -v /dev/nvidia0:/dev/nvidia0 -v /dev/nvidiactl:/dev/nvidiactl -v /dev/nvidia-modeset:/dev/nvidia-modeset nvidia/cuda:12.0-base nvidia-smi"
+    echo -e "${YELLOW}Next steps:${NC}"
+    echo -e "  1. Access Portainer at: https://$(pct exec $CTID -- hostname -I | awk '{print $1}'):9443"
+    echo -e "  2. Test GPU with: docker run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu20.04 nvidia-smi"
+    echo -e "  3. Manage containers with: docker-compose"
     
     return 0
 }
