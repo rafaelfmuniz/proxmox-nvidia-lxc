@@ -839,13 +839,13 @@ install_docker_stack() {
         fi
     fi
     
-    # CORRIGIDO: Configure Docker for GPU support
+    # CORRIGIDA: Configure Docker for GPU support
     log "INFO" "Configuring Docker for GPU support..."
     
     # Create Docker daemon configuration directory
     pct exec $CTID -- mkdir -p /etc/docker
     
-    # CORRIGIDO: Create daemon.json with proper permissions and content
+    # Create daemon.json for GPU support
     pct exec $CTID -- bash -c 'cat > /etc/docker/daemon.json << "EOF"
 {
     "runtimes": {
@@ -853,29 +853,40 @@ install_docker_stack() {
             "path": "nvidia-container-runtime",
             "runtimeArgs": []
         }
-    }
+    },
+    "default-runtime": "nvidia"
 }
 EOF'
     
-    # CORRIGIDO: Set proper permissions
-    pct exec $CTID -- chmod 644 /etc/docker/daemon.json
-    
-    # Install NVIDIA Container Toolkit in the container
-    log "INFO" "Installing NVIDIA Container Toolkit in container..."
+    # CORRIGIDA: Instalação simplificada do NVIDIA Container Toolkit
+    log "INFO" "Installing NVIDIA Container Toolkit..."
     pct exec $CTID -- apt-get update
-    pct exec $CTID -- apt-get install -y curl
+    pct exec $CTID -- apt-get install -y curl gnupg
     
-    # Add NVIDIA Container Toolkit repository
+    # Configurar repositório NVIDIA (força a instalação para Debian Bookworm)
     pct exec $CTID -- curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-    pct exec $CTID -- curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    pct exec $CTID -- curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+        tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
     
     pct exec $CTID -- apt-get update
-    pct exec $CTID -- apt-get install -y nvidia-container-toolkit nvidia-docker2
+    
+    # Tentar instalar os pacotes NVIDIA
+    if pct exec $CTID -- apt-get install -y nvidia-container-toolkit nvidia-docker2; then
+        log "SUCCESS" "NVIDIA Container Toolkit installed successfully"
+    else
+        log "WARNING" "Failed to install NVIDIA Container Toolkit, using fallback method"
+        # Método alternativo: instalar apenas o necessário
+        pct exec $CTID -- apt-get install -y nvidia-container-runtime
+    fi
     
     # Restart Docker to apply changes
     pct exec $CTID -- systemctl restart docker
     
     log "SUCCESS" "Docker configured successfully for GPU support"
+    
+    # [O resto da função permanece igual...]
+    # Continue com a instalação do Portainer e testes...
     
     # Handle Portainer installation/repair
     if [ "$install_portainer" = true ] || ([ "$repair_mode" = true ] && [ -n "$portainer_running" ]); then
